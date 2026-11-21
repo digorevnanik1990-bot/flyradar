@@ -1,10 +1,14 @@
 import json
 import os
 import re
+import time
+
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 from urllib.parse import urljoin, urlparse
+from urllib.error import URLError, HTTPError
+
 
 BASE = "https://21.mchs.gov.ru"
 SOURCE = BASE + "/deyatelnost/press-centr/vse_novosti"
@@ -25,12 +29,12 @@ class Parser(HTMLParser):
 
         if tag == "a":
             url = urljoin(BASE, attrs.get("href", ""))
-            path = urlparse(url).path
+            parsed = urlparse(url)
 
             if (
-                urlparse(url).netloc == "21.mchs.gov.ru"
-                and "/deyatelnost/press-centr/" in path
-                and path.rstrip("/") !=
+                parsed.netloc == "21.mchs.gov.ru"
+                and "/deyatelnost/press-centr/" in parsed.path
+                and parsed.path.rstrip("/") !=
                 "/deyatelnost/press-centr/vse_novosti"
             ):
                 self.links.add(url)
@@ -46,6 +50,7 @@ class Parser(HTMLParser):
 
     def handle_data(self, data):
         self.text += " " + data
+
         if self.in_h1:
             self.h1 += " " + data
 
@@ -55,14 +60,37 @@ class Parser(HTMLParser):
 
 
 def fetch(url):
-    request = Request(
-        url,
-        headers={"User-Agent": "FlyRadar/1.0"}
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 FlyRadar/1.0"
+                }
+            )
+
+            with urlopen(request, timeout=60) as response:
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"HTTP status: {response.status}"
+                    )
+
+                return response.read().decode(
+                    "utf-8", errors="replace"
+                )
+
+        except (URLError, TimeoutError, HTTPError) as error:
+            last_error = error
+            print(f"Attempt {attempt + 1} failed: {error}")
+
+            if attempt < 2:
+                time.sleep(10 * (attempt + 1))
+
+    raise RuntimeError(
+        f"Official source unavailable after 3 attempts: {last_error}"
     )
-    with urlopen(request, timeout=25) as response:
-        if response.status != 200:
-            raise RuntimeError("Official source unavailable")
-        return response.read().decode("utf-8", errors="replace")
 
 
 def classify(title, body):
@@ -73,9 +101,10 @@ def classify(title, body):
     if "чуваш" not in combined:
         return None
 
-    rocket = bool(re.search(r"ракетн\w*\s+опасност", combined))
+    rocket = bool(re.search(r"ракетн\w*\s+опасность", combined))
+
     drone = bool(re.search(
-        r"беспилотн\w*\s+опасност|опасность\w*\s+атак\w*\s+бпла",
+        r"беспилотн\w*\s+опасность|опасность\w*\s+атак\w*\s+бпла",
         combined
     ))
 
@@ -97,6 +126,8 @@ def classify(title, body):
 
 
 def main():
+    print("FlyRadar: starting collection")
+
     listing = Parser()
     listing.feed(fetch(SOURCE))
 
@@ -108,10 +139,12 @@ def main():
             page.feed(fetch(url))
 
             title = re.sub(r"\s+", " ", page.h1).strip()
+
             if not title:
                 continue
 
             event = classify(title, page.text)
+
             if event is None:
                 continue
 
@@ -144,6 +177,7 @@ def main():
         json.dump(output, file, ensure_ascii=False, indent=2)
 
     print("Matching publications:", len(results))
+    print("FlyRadar: collection finished")
 
 
 if __name__ == "__main__":
